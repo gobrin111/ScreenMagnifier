@@ -1,21 +1,20 @@
 import customtkinter as ctk
-import threading
 import keyboard
+import threading
 
-from magnifier import Magnifier
 from Config import config
+from magnifier import Magnifier
 
-# ─── Theme ───────────────────────────────────────────────────────────────────
 
+# Theme
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
-ACCENT       = "#1f6aa5"
+ACCENT = "#1f6aa5"
 ACCENT_HOVER = "#144870"
-BG_CARD      = "#2b2b2b"
-TEXT_DIM     = "#888888"
+BG_CARD = "#2b2b2b"
+TEXT_DIM = "#888888"
 
-# ─── App ─────────────────────────────────────────────────────────────────────
 
 mag = Magnifier()
 threading.Thread(target=mag.run, daemon=True).start()
@@ -25,9 +24,9 @@ class KeybindButton(ctk.CTkButton):
     """A button that captures a new key when clicked."""
 
     def __init__(self, master, label, config_attr, hook_name, **kwargs):
-        self.config_attr = config_attr      # e.g. "TOGGLE_KEY"
-        self.hook_name   = hook_name        # e.g. "toggle"
-        self.label_text  = label
+        self.config_attr = config_attr
+        self.hook_name = hook_name
+        self.label_text = label
         self._rebind_hook = None
 
         current_key = getattr(config, config_attr)
@@ -46,28 +45,29 @@ class KeybindButton(ctk.CTkButton):
         )
 
     def _start_rebind(self):
-        self.configure(text=f"{self.label_text}:  ···", fg_color=ACCENT)
+        if self._rebind_hook is not None:
+            keyboard.unhook(self._rebind_hook)
+        self.configure(text=f"{self.label_text}:  ...", fg_color=ACCENT)
         self._rebind_hook = keyboard.on_press(self._on_key)
 
     def _on_key(self, event):
         new_key = event.name
 
-        # Update config
         setattr(config, self.config_attr, new_key)
-
-        # Rebind in magnifier
         mag.rebind_key(self.hook_name, new_key)
 
-        # Update button text
+        if self._rebind_hook is not None:
+            keyboard.unhook(self._rebind_hook)
+            self._rebind_hook = None
+
+        # The keyboard hook runs off the Tk main thread.
+        self.after(0, self._finish_rebind, new_key)
+
+    def _finish_rebind(self, new_key):
         self.configure(
             text=f"{self.label_text}:  {new_key.upper()}",
             fg_color=BG_CARD,
         )
-
-        # Remove the temporary listener
-        if self._rebind_hook is not None:
-            keyboard.unhook(self._rebind_hook)
-            self._rebind_hook = None
 
 
 class App(ctk.CTk):
@@ -77,8 +77,13 @@ class App(ctk.CTk):
         self.title("FPS Magnifier")
         self.geometry("340x620")
         self.resizable(False, False)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # ── Header ───────────────────────────────────────────────────────
+        self._poll_after_id = None
+        self._last_on = None
+        self._last_zoom = None
+        self._last_radius = None
+
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(18, 4))
 
@@ -90,7 +95,7 @@ class App(ctk.CTk):
 
         self.status_label = ctk.CTkLabel(
             header,
-            text="● OFF",
+            text="OFF",
             font=ctk.CTkFont(size=13),
             text_color="#ff4444",
         )
@@ -103,7 +108,6 @@ class App(ctk.CTk):
             text_color=TEXT_DIM,
         ).pack(anchor="w", padx=20, pady=(0, 12))
 
-        # ── Toggle button ────────────────────────────────────────────────
         self.toggle_btn = ctk.CTkButton(
             self,
             text="Toggle Magnifier",
@@ -114,7 +118,6 @@ class App(ctk.CTk):
         )
         self.toggle_btn.pack(fill="x", padx=20, pady=(0, 16))
 
-        # ── Zoom slider ──────────────────────────────────────────────────
         self._section_label("Zoom")
 
         zoom_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -138,7 +141,6 @@ class App(ctk.CTk):
         self.zoom_slider.set(config.ZOOM)
         self.zoom_slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        # ── Region slider ────────────────────────────────────────────────
         self._section_label("Capture Region")
 
         region_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -164,7 +166,6 @@ class App(ctk.CTk):
         self.region_slider.set(config.CAPTURE_RADIUS)
         self.region_slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        # ── Filter toggle ────────────────────────────────────────────────
         filter_frame = ctk.CTkFrame(self, fg_color="transparent")
         filter_frame.pack(fill="x", padx=20, pady=(12, 4))
 
@@ -185,7 +186,6 @@ class App(ctk.CTk):
         )
         self.filter_menu.pack(side="right")
 
-        # ── Crosshair toggle ─────────────────────────────────────────────
         cross_frame = ctk.CTkFrame(self, fg_color="transparent")
         cross_frame.pack(fill="x", padx=20, pady=(8, 4))
 
@@ -206,25 +206,27 @@ class App(ctk.CTk):
         )
         self.cross_switch.pack(side="right")
 
-        # ── Keybinds section ─────────────────────────────────────────────
         self._section_label("Keybinds", top_pad=16)
 
         keybind_frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=10)
         keybind_frame.pack(fill="x", padx=20, pady=(0, 12))
 
         binds = [
-            ("Toggle",      "TOGGLE_KEY",      "toggle"),
-            ("Zoom In",     "ZOOM_IN_KEY",     "zoom_in"),
-            ("Zoom Out",    "ZOOM_OUT_KEY",    "zoom_out"),
-            ("Region +",    "REGION_UP_KEY",   "region_up"),
-            ("Region −",    "REGION_DOWN_KEY", "region_down"),
+            ("Toggle", "TOGGLE_KEY", "toggle"),
+            ("Zoom In", "ZOOM_IN_KEY", "zoom_in"),
+            ("Zoom Out", "ZOOM_OUT_KEY", "zoom_out"),
+            ("Region +", "REGION_UP_KEY", "region_up"),
+            ("Region -", "REGION_DOWN_KEY", "region_down"),
         ]
 
         for i, (label, attr, hook) in enumerate(binds):
             btn = KeybindButton(keybind_frame, label, attr, hook)
-            btn.pack(fill="x", padx=8, pady=(8 if i == 0 else 2, 8 if i == len(binds) - 1 else 2))
+            btn.pack(
+                fill="x",
+                padx=8,
+                pady=(8 if i == 0 else 2, 8 if i == len(binds) - 1 else 2),
+            )
 
-        # ── Footer ───────────────────────────────────────────────────────
         ctk.CTkLabel(
             self,
             text="Game must be in Borderless Windowed",
@@ -232,10 +234,7 @@ class App(ctk.CTk):
             text_color="#666666",
         ).pack(side="bottom", pady=(0, 10))
 
-        # ── Poll magnifier state for status indicator ────────────────────
         self._poll_status()
-
-    # ── helpers ───────────────────────────────────────────────────────────
 
     def _section_label(self, text, top_pad=8):
         ctk.CTkLabel(
@@ -245,45 +244,63 @@ class App(ctk.CTk):
             text_color=TEXT_DIM,
         ).pack(anchor="w", padx=20, pady=(top_pad, 2))
 
-    # ── callbacks ─────────────────────────────────────────────────────────
-
     def _toggle(self):
         mag.toggle()
+        self._sync_from_magnifier()
 
     def _on_zoom(self, val):
         mag.zoom = round(float(val), 2)
         self.zoom_val.configure(text=f"{mag.zoom:.1f}x")
+        self._last_zoom = mag.zoom
 
     def _on_region(self, val):
         mag.radius = int(float(val))
         self.region_val.configure(text=f"{mag.radius * 2}px")
+        self._last_radius = mag.radius
 
     def _on_filter(self, val):
         config.GPU_FILTER = val
-        # Shader is compiled at overlay init — tell magnifier to recreate
+        # Shader is compiled at overlay init; tell magnifier to recreate it.
         mag._rebuild_overlay = True
 
     def _on_crosshair(self):
         config.CROSSHAIR = self.cross_var.get()
 
     def _poll_status(self):
-        if mag.on:
-            self.status_label.configure(text="● ON", text_color="#44ff44")
-            self.toggle_btn.configure(fg_color="#2d8a4e", hover_color="#1f6b38")
-        else:
-            self.status_label.configure(text="● OFF", text_color="#ff4444")
-            self.toggle_btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOVER)
+        self._sync_from_magnifier()
+        self._poll_after_id = self.after(200, self._poll_status)
 
-        # Sync slider to current zoom/region (could change via hotkey)
-        self.zoom_slider.set(mag.zoom)
-        self.zoom_val.configure(text=f"{mag.zoom:.1f}x")
-        self.region_slider.set(mag.radius)
-        self.region_val.configure(text=f"{mag.radius * 2}px")
+    def _sync_from_magnifier(self):
+        on = bool(mag.on)
+        zoom = float(mag.zoom)
+        radius = int(mag.radius)
 
-        self.after(200, self._poll_status)
+        if on != self._last_on:
+            if on:
+                self.status_label.configure(text="ON", text_color="#44ff44")
+                self.toggle_btn.configure(fg_color="#2d8a4e", hover_color="#1f6b38")
+            else:
+                self.status_label.configure(text="OFF", text_color="#ff4444")
+                self.toggle_btn.configure(fg_color=ACCENT, hover_color=ACCENT_HOVER)
+            self._last_on = on
 
+        if zoom != self._last_zoom:
+            self.zoom_slider.set(zoom)
+            self.zoom_val.configure(text=f"{zoom:.1f}x")
+            self._last_zoom = zoom
 
-# ─── MAIN ────────────────────────────────────────────────────────────────────
+        if radius != self._last_radius:
+            self.region_slider.set(radius)
+            self.region_val.configure(text=f"{radius * 2}px")
+            self._last_radius = radius
+
+    def _on_close(self):
+        if self._poll_after_id is not None:
+            self.after_cancel(self._poll_after_id)
+            self._poll_after_id = None
+        mag.quit()
+        self.destroy()
+
 
 if __name__ == "__main__":
     app = App()
