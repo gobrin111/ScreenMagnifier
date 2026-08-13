@@ -1,6 +1,7 @@
+import threading
+
 import customtkinter as ctk
 import keyboard
-import threading
 
 from Config import config
 from magnifier import Magnifier
@@ -16,14 +17,11 @@ BG_CARD = "#2b2b2b"
 TEXT_DIM = "#888888"
 
 
-mag = Magnifier()
-threading.Thread(target=mag.run, daemon=True).start()
-
-
 class KeybindButton(ctk.CTkButton):
     """A button that captures a new key when clicked."""
 
-    def __init__(self, master, label, config_attr, hook_name, **kwargs):
+    def __init__(self, master, magnifier, label, config_attr, hook_name, **kwargs):
+        self.magnifier = magnifier
         self.config_attr = config_attr
         self.hook_name = hook_name
         self.label_text = label
@@ -54,7 +52,7 @@ class KeybindButton(ctk.CTkButton):
         new_key = event.name
 
         setattr(config, self.config_attr, new_key)
-        mag.rebind_key(self.hook_name, new_key)
+        self.magnifier.rebind_key(self.hook_name, new_key)
 
         if self._rebind_hook is not None:
             keyboard.unhook(self._rebind_hook)
@@ -74,8 +72,15 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
+        self.magnifier = Magnifier()
+        self.worker = threading.Thread(
+            target=self.magnifier.run,
+            name="magnifier-renderer",
+            daemon=True,
+        )
+
         self.title("FPS Magnifier")
-        self.geometry("340x620")
+        self.geometry("340x690")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -83,6 +88,8 @@ class App(ctk.CTk):
         self._last_on = None
         self._last_zoom = None
         self._last_radius = None
+        self._last_fps = None
+        self._last_hotkeys_enabled = None
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(18, 4))
@@ -117,6 +124,26 @@ class App(ctk.CTk):
             font=ctk.CTkFont(size=14, weight="bold"),
         )
         self.toggle_btn.pack(fill="x", padx=20, pady=(0, 16))
+
+        hotkeys_frame = ctk.CTkFrame(self, fg_color="transparent")
+        hotkeys_frame.pack(fill="x", padx=20, pady=(0, 12))
+
+        ctk.CTkLabel(
+            hotkeys_frame,
+            text="Hotkeys",
+            font=ctk.CTkFont(size=13),
+            text_color=TEXT_DIM,
+        ).pack(side="left")
+
+        self.hotkeys_var = ctk.BooleanVar(value=self.magnifier.hotkeys_enabled)
+        self.hotkeys_switch = ctk.CTkSwitch(
+            hotkeys_frame,
+            text="",
+            variable=self.hotkeys_var,
+            command=self._on_hotkeys,
+            width=46,
+        )
+        self.hotkeys_switch.pack(side="right")
 
         self._section_label("Zoom")
 
@@ -166,8 +193,28 @@ class App(ctk.CTk):
         self.region_slider.set(config.CAPTURE_RADIUS)
         self.region_slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
+        fps_frame = ctk.CTkFrame(self, fg_color="transparent")
+        fps_frame.pack(fill="x", padx=20, pady=(12, 4))
+
+        ctk.CTkLabel(
+            fps_frame,
+            text="Overlay FPS",
+            font=ctk.CTkFont(size=13),
+            text_color=TEXT_DIM,
+        ).pack(side="left")
+
+        self.fps_var = ctk.StringVar(value=str(config.FPS))
+        self.fps_menu = ctk.CTkSegmentedButton(
+            fps_frame,
+            values=[str(value) for value in config.FPS_OPTIONS],
+            variable=self.fps_var,
+            command=self._on_fps,
+            font=ctk.CTkFont(size=12),
+        )
+        self.fps_menu.pack(side="right")
+
         filter_frame = ctk.CTkFrame(self, fg_color="transparent")
-        filter_frame.pack(fill="x", padx=20, pady=(12, 4))
+        filter_frame.pack(fill="x", padx=20, pady=(8, 4))
 
         ctk.CTkLabel(
             filter_frame,
@@ -186,26 +233,6 @@ class App(ctk.CTk):
         )
         self.filter_menu.pack(side="right")
 
-        cross_frame = ctk.CTkFrame(self, fg_color="transparent")
-        cross_frame.pack(fill="x", padx=20, pady=(8, 4))
-
-        ctk.CTkLabel(
-            cross_frame,
-            text="Crosshair",
-            font=ctk.CTkFont(size=13),
-            text_color=TEXT_DIM,
-        ).pack(side="left")
-
-        self.cross_var = ctk.BooleanVar(value=config.CROSSHAIR)
-        self.cross_switch = ctk.CTkSwitch(
-            cross_frame,
-            text="",
-            variable=self.cross_var,
-            command=self._on_crosshair,
-            width=46,
-        )
-        self.cross_switch.pack(side="right")
-
         self._section_label("Keybinds", top_pad=16)
 
         keybind_frame = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=10)
@@ -220,7 +247,13 @@ class App(ctk.CTk):
         ]
 
         for i, (label, attr, hook) in enumerate(binds):
-            btn = KeybindButton(keybind_frame, label, attr, hook)
+            btn = KeybindButton(
+                keybind_frame,
+                self.magnifier,
+                label,
+                attr,
+                hook,
+            )
             btn.pack(
                 fill="x",
                 padx=8,
@@ -234,6 +267,7 @@ class App(ctk.CTk):
             text_color="#666666",
         ).pack(side="bottom", pady=(0, 10))
 
+        self.worker.start()
         self._poll_status()
 
     def _section_label(self, text, top_pad=8):
@@ -245,35 +279,39 @@ class App(ctk.CTk):
         ).pack(anchor="w", padx=20, pady=(top_pad, 2))
 
     def _toggle(self):
-        mag.toggle()
+        self.magnifier.toggle()
         self._sync_from_magnifier()
 
     def _on_zoom(self, val):
-        mag.zoom = round(float(val), 2)
-        self.zoom_val.configure(text=f"{mag.zoom:.1f}x")
-        self._last_zoom = mag.zoom
+        self.magnifier.zoom = round(float(val), 2)
+        self.zoom_val.configure(text=f"{self.magnifier.zoom:.1f}x")
+        self._last_zoom = self.magnifier.zoom
 
     def _on_region(self, val):
-        mag.radius = int(float(val))
-        self.region_val.configure(text=f"{mag.radius * 2}px")
-        self._last_radius = mag.radius
+        self.magnifier.radius = int(float(val))
+        self.region_val.configure(text=f"{self.magnifier.radius * 2}px")
+        self._last_radius = self.magnifier.radius
 
     def _on_filter(self, val):
-        config.GPU_FILTER = val
-        # Shader is compiled at overlay init; tell magnifier to recreate it.
-        mag._rebuild_overlay = True
+        self.magnifier.set_filter(val)
 
-    def _on_crosshair(self):
-        config.CROSSHAIR = self.cross_var.get()
+    def _on_fps(self, val):
+        self.magnifier.set_fps(int(val))
+
+    def _on_hotkeys(self):
+        self.magnifier.set_hotkeys_enabled(self.hotkeys_var.get())
+        self._sync_from_magnifier()
 
     def _poll_status(self):
         self._sync_from_magnifier()
         self._poll_after_id = self.after(200, self._poll_status)
 
     def _sync_from_magnifier(self):
-        on = bool(mag.on)
-        zoom = float(mag.zoom)
-        radius = int(mag.radius)
+        on = bool(self.magnifier.on)
+        zoom = float(self.magnifier.zoom)
+        radius = int(self.magnifier.radius)
+        fps = int(self.magnifier.fps)
+        hotkeys_enabled = bool(self.magnifier.hotkeys_enabled)
 
         if on != self._last_on:
             if on:
@@ -294,11 +332,20 @@ class App(ctk.CTk):
             self.region_val.configure(text=f"{radius * 2}px")
             self._last_radius = radius
 
+        if fps != self._last_fps:
+            self.fps_var.set(str(fps))
+            self._last_fps = fps
+
+        if hotkeys_enabled != self._last_hotkeys_enabled:
+            self.hotkeys_var.set(hotkeys_enabled)
+            self._last_hotkeys_enabled = hotkeys_enabled
+
     def _on_close(self):
         if self._poll_after_id is not None:
             self.after_cancel(self._poll_after_id)
             self._poll_after_id = None
-        mag.quit()
+        self.magnifier.quit()
+        self.worker.join(timeout=1.0)
         self.destroy()
 
 

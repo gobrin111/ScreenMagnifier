@@ -13,9 +13,8 @@ Requirements:
 Your game MUST be in Borderless Windowed mode.
 """
 
-import sys
-import time
 import ctypes
+import time
 
 import mss
 import keyboard
@@ -25,7 +24,6 @@ import win32con
 import win32api
 
 from OpenGL.GL import *
-from OpenGL.GL import shaders as gl_shaders
 
 # Use ctypes for WGL — PyOpenGL's WGL wrappers choke on pywin32 handle types
 opengl32 = ctypes.windll.opengl32
@@ -36,6 +34,7 @@ from Config import config
 
 user32 = ctypes.windll.user32
 gdi32  = ctypes.windll.gdi32
+kernel32 = ctypes.windll.kernel32
 
 _vp = ctypes.c_void_p
 
@@ -45,6 +44,8 @@ user32.ReleaseDC.argtypes    = [_vp, _vp]
 user32.GetWindowLongW.argtypes  = [_vp, ctypes.c_int]
 user32.SetWindowLongW.argtypes  = [_vp, ctypes.c_int, ctypes.c_long]
 user32.SetLayeredWindowAttributes.argtypes = [_vp, ctypes.c_uint, ctypes.c_ubyte, ctypes.c_uint]
+user32.SetWindowDisplayAffinity.restype = ctypes.c_bool
+user32.SetWindowDisplayAffinity.argtypes = [_vp, ctypes.c_uint]
 
 gdi32.ChoosePixelFormat.restype  = ctypes.c_int
 gdi32.ChoosePixelFormat.argtypes = [_vp, ctypes.c_void_p]
@@ -60,7 +61,12 @@ opengl32.wglMakeCurrent.argtypes   = [_vp, _vp]
 opengl32.wglDeleteContext.restype  = ctypes.c_bool
 opengl32.wglDeleteContext.argtypes = [_vp]
 
+kernel32.GetCurrentThread.restype = _vp
+kernel32.SetThreadPriority.restype = ctypes.c_bool
+kernel32.SetThreadPriority.argtypes = [_vp, ctypes.c_int]
+
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
+THREAD_PRIORITY_BELOW_NORMAL = -1
 
 PFD_DRAW_TO_WINDOW = 0x00000004
 PFD_SUPPORT_OPENGL = 0x00000020
@@ -71,6 +77,19 @@ GL_BGRA_EXT = 0x80E1
 
 CLASS_NAME = "FPSMagOverlayGL"
 _registered = False
+
+
+def _set_dpi_awareness():
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+_set_dpi_awareness()
 
 
 # ─── GLSL Shaders ────────────────────────────────────────────────────────────
@@ -272,11 +291,14 @@ class OverlayWindow:
             x, y, w, h, 0, 0, hinst, None
         )
 
-        self.exclude_ok = bool(
-            user32.SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE)
-        )
-        if not self.exclude_ok:
-            print("  ⚠  WDA_EXCLUDEFROMCAPTURE failed (need Win10 2004+)")
+        if config.EXCLUDE_FROM_CAPTURE:
+            self.exclude_ok = bool(
+                user32.SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE)
+            )
+        else:
+            self.exclude_ok = False
+        if config.EXCLUDE_FROM_CAPTURE and not self.exclude_ok:
+            print("  WDA_EXCLUDEFROMCAPTURE unavailable; using layered-window filtering")
 
         # ── OpenGL context ───────────────────────────────────────────────
         self.hdc = user32.GetDC(self.hwnd)
@@ -313,9 +335,6 @@ class OverlayWindow:
         )
         user32.SetLayeredWindowAttributes(self.hwnd, 0, 255, LWA_ALPHA)
 
-        # ── OpenGL state ─────────────────────────────────────────────────
-        glClearColor(0, 0, 0, 1)
-
         # Texture — always GL_LINEAR for bicubic (the shader relies on it)
         self.tex = glGenTextures(1)
         glBindTexture(GL_TEXTURE_2D, self.tex)
@@ -335,6 +354,7 @@ class OverlayWindow:
         self._tex_h = 0
         self.w = w
         self.h = h
+        glViewport(0, 0, self.w, self.h)
 
         # ── Compile shaders ──────────────────────────────────────────────
         vert = _compile_shader(VERTEX_SHADER, GL_VERTEX_SHADER)
@@ -347,8 +367,12 @@ class OverlayWindow:
         self.program = _link_program(vert, frag)
 
         # Uniform locations
-        self.u_tex      = glGetUniformLocation(self.program, "tex")
-        self.u_texSize  = glGetUniformLocation(self.program, "texSize")
+        u_tex          = glGetUniformLocation(self.program, "tex")
+        self.u_texSize = glGetUniformLocation(self.program, "texSize")
+
+        glUseProgram(self.program)
+        glUniform1i(u_tex, 0)
+        glUseProgram(0)
 
         # Attribute locations
         self.a_position = glGetAttribLocation(self.program, "position")
@@ -381,55 +405,66 @@ class OverlayWindow:
         stride = 4 * 4  # 4 floats × 4 bytes
         # position attribute
         glEnableVertexAttribArray(self.a_position)
-        glVertexAttribPointer(self.a_position, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
+        glVertexAttribPointer(
+            self.a_position,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            stride,
+            ctypes.c_void_p(0),
+        )
         # texcoord attribute
         glEnableVertexAttribArray(self.a_texcoord)
-        glVertexAttribPointer(self.a_texcoord, 2, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(8))
+        glVertexAttribPointer(
+            self.a_texcoord,
+            2,
+            GL_FLOAT,
+            GL_FALSE,
+            stride,
+            ctypes.c_void_p(8),
+        )
 
         glBindVertexArray(0)
 
-        self._topmost()
+        self.visible = False
+        self.topmost()
 
     # ── window management ────────────────────────────────────────────────
 
-    def _topmost(self):
+    def topmost(self):
         win32gui.SetWindowPos(
             self.hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0,
             win32con.SWP_NOMOVE | win32con.SWP_NOSIZE |
             win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW
         )
-
-    def show(self):
-        win32gui.ShowWindow(self.hwnd, win32con.SW_SHOWNOACTIVATE)
-        self._topmost()
+        self.visible = True
 
     def hide(self):
+        if not self.visible:
+            return
         win32gui.SetWindowPos(
             self.hwnd, win32con.HWND_TOPMOST,
             -32000, -32000, 1, 1,
             win32con.SWP_NOACTIVATE
         )
+        self.visible = False
 
     def move(self, x, y, w, h):
         self.w, self.h = w, h
+        glViewport(0, 0, self.w, self.h)
         win32gui.SetWindowPos(
             self.hwnd, win32con.HWND_TOPMOST, x, y, w, h,
             win32con.SWP_NOACTIVATE | win32con.SWP_SHOWWINDOW
         )
-
-    def topmost(self):
-        self._topmost()
+        self.visible = True
 
     # ── rendering ────────────────────────────────────────────────────────
 
     def render(self, raw_bgra, cap_w, cap_h):
-        opengl32.wglMakeCurrent(self.hdc, self.hglrc)
-        glViewport(0, 0, self.w, self.h)
-        glClear(GL_COLOR_BUFFER_BIT)
-
         # Upload texture
         glBindTexture(GL_TEXTURE_2D, self.tex)
-        if cap_w != self._tex_w or cap_h != self._tex_h:
+        texture_resized = cap_w != self._tex_w or cap_h != self._tex_h
+        if texture_resized:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cap_w, cap_h, 0,
                          GL_BGRA_EXT, GL_UNSIGNED_BYTE, raw_bgra)
             self._tex_w = cap_w
@@ -440,8 +475,7 @@ class OverlayWindow:
 
         # Draw fullscreen quad with shader
         glUseProgram(self.program)
-        glUniform1i(self.u_tex, 0)
-        if self.u_texSize >= 0:
+        if texture_resized and self.u_texSize >= 0:
             glUniform2f(self.u_texSize, float(cap_w), float(cap_h))
 
         glBindVertexArray(self.vao)
@@ -473,22 +507,6 @@ class OverlayWindow:
             glVertex2f(-1 + inset_x,  1 - inset_y)
             glEnd()
 
-        # Crosshair
-        if config.CROSSHAIR:
-            r, g, b = config.CROSS_COLOR
-            glColor3f(r, g, b)
-            glLineWidth(config.CROSS_WIDTH)
-            gap_x = config.CROSS_GAP * px
-            gap_y = config.CROSS_GAP * py
-            len_x = config.CROSS_LEN * px
-            len_y = config.CROSS_LEN * py
-            glBegin(GL_LINES)
-            glVertex2f(-len_x, 0); glVertex2f(-gap_x, 0)
-            glVertex2f( gap_x, 0); glVertex2f( len_x, 0)
-            glVertex2f(0, -len_y); glVertex2f(0, -gap_y)
-            glVertex2f(0,  gap_y); glVertex2f(0,  len_y)
-            glEnd()
-
         gdi32.SwapBuffers(self.hdc)
 
     def destroy(self):
@@ -506,161 +524,246 @@ class Magnifier:
         self.alive = True
         self.zoom = config.ZOOM
         self.radius = config.CAPTURE_RADIUS
+        self.fps = config.FPS
         self.win = None
         self._last_topmost = 0
         self._last_size = 0
         self._needs_reposition = False
         self._rebuild_overlay = False
+        self._needs_monitor_update = True
+        self.hotkeys_enabled = True
 
         self._hooks = {}
+        self.sct = None
+        self.monitor_index = config.MONITOR_INDEX
 
-        self.sct = mss.MSS()
-        m = self.sct.monitors[1]
-        self.sw, self.sh = m["width"], m["height"]
-        self.cx, self.cy = self.sw // 2, self.sh // 2
+    def _update_monitor_geometry(self):
+        if self.sct is None:
+            return
+
+        monitors = self.sct.monitors
+        if self.monitor_index >= len(monitors):
+            self.monitor_index = 1
+
+        m = monitors[self.monitor_index]
+        self.screen_left = int(m["left"])
+        self.screen_top = int(m["top"])
+        width = int(m["width"])
+        height = int(m["height"])
+        self.screen_width = width
+        self.screen_height = height
+        self.screen_right = self.screen_left + width
+        self.screen_bottom = self.screen_top + height
+        self.cx = self.screen_left + width // 2
+        self.cy = self.screen_top + height // 2
+
+    @property
+    def capture_radius(self):
+        """Capture only the source pixels that can actually be visible."""
+        max_visible_radius = int(
+            min(self.screen_width, self.screen_height) / (2 * self.zoom)
+        )
+        return min(self.radius, max(1, max_visible_radius))
 
     @property
     def size(self):
-        return int(self.radius * 2 * self.zoom)
+        return int(self.capture_radius * 2 * self.zoom)
+
+    def overlay_rect(self):
+        sz = self.size
+        return self.cx - sz // 2, self.cy - sz // 2, sz
 
     def grab(self):
-        r = self.radius
+        if self.sct is None:
+            raise RuntimeError("Screen capture is not initialized")
+
+        r = self.capture_radius
+        left = max(self.screen_left, min(self.cx - r, self.screen_right - r * 2))
+        top = max(self.screen_top, min(self.cy - r, self.screen_bottom - r * 2))
         region = {
-            "left": max(0, self.cx - r), "top": max(0, self.cy - r),
+            "left": left, "top": top,
             "width": r * 2, "height": r * 2,
         }
         return self.sct.grab(region)
 
     def ensure_window(self):
-        sz = self.size
-        ox, oy = self.cx - sz // 2, self.cy - sz // 2
+        ox, oy, sz = self.overlay_rect()
         if self.win is None:
             self.win = OverlayWindow(ox, oy, sz, sz)
             self._last_size = sz
-        elif sz != self._last_size:
+        elif sz != self._last_size or self._needs_reposition:
             self.win.move(ox, oy, sz, sz)
             self._last_size = sz
+        self._needs_reposition = False
+
+    def _destroy_overlay(self):
+        if self.win is None:
+            return
+        self.win.destroy()
+        self.win = None
+        self._last_size = 0
+
+    def set_filter(self, value):
+        if value == config.GPU_FILTER:
+            return
+        config.GPU_FILTER = value
+        self._rebuild_overlay = True
+
+    def set_fps(self, value):
+        self.fps = max(1, int(value))
 
     # ── hotkey management ────────────────────────────────────────────────
 
     def _bind_key(self, name, key, callback):
-        if name in self._hooks and self._hooks[name] is not None:
-            keyboard.unhook(self._hooks[name])
+        current_hook = self._hooks.get(name)
+        if current_hook is not None:
+            keyboard.unhook(current_hook)
         self._hooks[name] = keyboard.on_press_key(key, callback, suppress=False)
 
-    def rebind_key(self, name, new_key):
-        callbacks = {
-            "toggle":      lambda _: self.toggle(),
-            "zoom_in":     lambda _: self.adj_zoom(config.ZOOM_STEP),
-            "zoom_out":    lambda _: self.adj_zoom(-config.ZOOM_STEP),
-            "region_up":   lambda _: self.adj_radius(config.CAPTURE_STEP),
-            "region_down": lambda _: self.adj_radius(-config.CAPTURE_STEP),
+    def _hotkey_callbacks(self):
+        return {
+            "toggle": (config.TOGGLE_KEY, lambda _: self.toggle()),
+            "zoom_in": (
+                config.ZOOM_IN_KEY,
+                lambda _: self.adj_zoom(config.ZOOM_STEP),
+            ),
+            "zoom_out": (
+                config.ZOOM_OUT_KEY,
+                lambda _: self.adj_zoom(-config.ZOOM_STEP),
+            ),
+            "region_up": (
+                config.REGION_UP_KEY,
+                lambda _: self.adj_radius(config.CAPTURE_STEP),
+            ),
+            "region_down": (
+                config.REGION_DOWN_KEY,
+                lambda _: self.adj_radius(-config.CAPTURE_STEP),
+            ),
         }
-        if name in callbacks:
-            self._bind_key(name, new_key, callbacks[name])
+
+    def _bind_hotkeys(self):
+        for name, (key, callback) in self._hotkey_callbacks().items():
+            self._bind_key(name, key, callback)
+
+    def _unbind_hotkeys(self):
+        for name, hook in self._hooks.items():
+            if hook is not None:
+                keyboard.unhook(hook)
+                self._hooks[name] = None
+
+    def set_hotkeys_enabled(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self.hotkeys_enabled:
+            return
+
+        self.hotkeys_enabled = enabled
+        if enabled:
+            self._bind_hotkeys()
+            print("  Hotkeys enabled")
+        else:
+            self._unbind_hotkeys()
+            print("  Hotkeys disabled")
+
+    def rebind_key(self, name, new_key):
+        callbacks = self._hotkey_callbacks()
+        if self.hotkeys_enabled and name in callbacks:
+            self._bind_key(name, new_key, callbacks[name][1])
 
     # ── main loop ────────────────────────────────────────────────────────
 
     def run(self):
-        self._bind_key("toggle",      config.TOGGLE_KEY,      lambda _: self.toggle())
-        self._bind_key("zoom_in",     config.ZOOM_IN_KEY,     lambda _: self.adj_zoom(config.ZOOM_STEP))
-        self._bind_key("zoom_out",    config.ZOOM_OUT_KEY,    lambda _: self.adj_zoom(-config.ZOOM_STEP))
-        self._bind_key("region_up",   config.REGION_UP_KEY,   lambda _: self.adj_radius(config.CAPTURE_STEP))
-        self._bind_key("region_down", config.REGION_DOWN_KEY, lambda _: self.adj_radius(-config.CAPTURE_STEP))
+        self.sct = mss.MSS()
+        try:
+            if config.LOW_PRIORITY:
+                kernel32.SetThreadPriority(
+                    kernel32.GetCurrentThread(),
+                    THREAD_PRIORITY_BELOW_NORMAL,
+                )
 
-        print("╔═══════════════════════════════════════════╗")
-        print("║   FPS Screen Magnifier  (GPU + Bicubic)   ║")
-        print("╠═══════════════════════════════════════════╣")
-        print(f"║  Toggle:   {config.TOGGLE_KEY:<30s} ║")
-        print(f"║  Zoom:     +/-  ({self.zoom:.1f}x)                    ║")
-        print(f"║  Region:   [/]  ({self.radius*2}px)                  ║")
-        print(f"║  Filter:   {config.GPU_FILTER:<30s} ║")
-        print("╠═══════════════════════════════════════════╣")
-        print("║  ⚠  Game must be Borderless Windowed      ║")
-        print("╚═══════════════════════════════════════════╝")
-        print()
+            self._update_monitor_geometry()
+            self._needs_monitor_update = False
 
-        dt = 1.0 / config.FPS
+            if self.hotkeys_enabled:
+                self._bind_hotkeys()
 
-        while self.alive:
-            t0 = time.perf_counter()
+            print("+-------------------------------------------+")
+            print("|           FPS Screen Magnifier            |")
+            print("+-------------------------------------------+")
+            print(f"|  Toggle:   {config.TOGGLE_KEY:<30s} |")
+            print(f"|  Zoom:     +/-  ({self.zoom:.1f}x)                    |")
+            print(f"|  Region:   [/]  ({self.radius*2}px)                  |")
+            print(f"|  Filter:   {config.GPU_FILTER:<30s} |")
+            print(f"|  FPS:      {self.fps:<30d} |")
+            print("+-------------------------------------------+")
+            print("|  Game must be Borderless Windowed         |")
+            print("+-------------------------------------------+")
+            print()
 
-            if self.on:
-                # Rebuild overlay if filter changed (recompiles shader)
-                if self._rebuild_overlay and self.win is not None:
-                    self.win.destroy()
-                    self.win = None
-                    self._last_size = 0
+            while self.alive:
+                t0 = time.perf_counter()
+
+                if self._rebuild_overlay:
+                    self._destroy_overlay()
                     self._rebuild_overlay = False
                     self._needs_reposition = True
 
-                self.ensure_window()
+                if self.on:
+                    if self._needs_monitor_update:
+                        self._update_monitor_geometry()
+                        self._needs_monitor_update = False
+                        self._needs_reposition = True
 
-                if self._needs_reposition:
-                    sz = self.size
-                    ox, oy = self.cx - sz // 2, self.cy - sz // 2
-                    self.win.move(ox, oy, sz, sz)
-                    self._last_size = sz
-                    self._needs_reposition = False
+                    self.ensure_window()
 
-                now = time.perf_counter() * 1000
-                if now - self._last_topmost > config.TOPMOST_MS:
-                    self.win.topmost()
-                    self._last_topmost = now
+                    now = time.perf_counter() * 1000
+                    if now - self._last_topmost > config.TOPMOST_MS:
+                        self.win.topmost()
+                        self._last_topmost = now
 
-                fallback = self.win and not self.win.exclude_ok
-                if fallback:
-                    self.win.hide()
-                    time.sleep(0.002)
-
-                shot = self.grab()
-
-                if fallback:
-                    sz = self.size
-                    ox, oy = self.cx - sz // 2, self.cy - sz // 2
-                    self.win.move(ox, oy, sz, sz)
-
-                self.win.render(bytes(shot.raw), shot.width, shot.height)
-            else:
-                if self._rebuild_overlay and self.win is not None:
-                    self.win.destroy()
-                    self.win = None
-                    self._last_size = 0
-                    self._rebuild_overlay = False
-                if self.win:
+                    shot = self.grab()
+                    self.win.render(shot.raw, shot.width, shot.height)
+                elif self.win is not None:
                     self.win.hide()
 
-            win32gui.PumpWaitingMessages()
+                win32gui.PumpWaitingMessages()
 
-            elapsed = time.perf_counter() - t0
-            if elapsed < dt:
-                time.sleep(dt - elapsed)
-
-        if self.win:
-            self.win.destroy()
-        for h in self._hooks.values():
-            if h is not None:
-                keyboard.unhook(h)
-        sys.exit(0)
+                target_fps = self.fps if self.on else config.IDLE_FPS
+                dt = 1.0 / target_fps
+                elapsed = time.perf_counter() - t0
+                if elapsed < dt:
+                    time.sleep(dt - elapsed)
+        finally:
+            self.on = False
+            self.alive = False
+            self._destroy_overlay()
+            self._unbind_hotkeys()
+            self.sct.close()
+            self.sct = None
 
     # ── callbacks ────────────────────────────────────────────────────────
 
     def toggle(self):
         self.on = not self.on
         if self.on:
+            self._needs_monitor_update = True
             self._needs_reposition = True
         s = "ON " if self.on else "OFF"
-        print(f"  ► Magnifier {s}  │  {self.zoom:.1f}x  │  {self.radius*2}px")
+        print(f"  > Magnifier {s}  |  {self.zoom:.1f}x  |  {self.radius*2}px")
 
     def adj_zoom(self, d):
-        if not self.on: return
-        self.zoom = round(max(config.ZOOM_MIN, min(config.ZOOM_MAX, self.zoom + d)), 2)
-        print(f"    zoom → {self.zoom:.1f}x")
+        if not self.on:
+            return
+        self.zoom = round(
+            max(config.ZOOM_MIN, min(config.ZOOM_MAX, self.zoom + d)),
+            2,
+        )
+        print(f"    zoom -> {self.zoom:.1f}x")
 
     def adj_radius(self, d):
-        if not self.on: return
+        if not self.on:
+            return
         self.radius = max(config.CAPTURE_MIN, min(config.CAPTURE_MAX, self.radius + d))
-        print(f"    region → {self.radius*2}px")
+        print(f"    region -> {self.radius*2}px")
 
     def quit(self):
         print("  Shutting down...")
@@ -670,12 +773,4 @@ class Magnifier:
 # ─── MAIN ────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:
-        try:
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-
     Magnifier().run()
