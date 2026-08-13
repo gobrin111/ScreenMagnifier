@@ -1,13 +1,35 @@
-# Screen Magnifier
+# FPS Screen Magnifier
 
-Gpu accelerated screen magnifier. Takes a customizable area of the center of your screen a projects a larger image of it in the center. Useful for mil-sim video games that have bad fov for their scopes on certain weapons. This can reduce eye strain and make target acquisition and aim adjustments easier.
+A Windows-only, GPU-rendered screen magnifier intended for games running in
+Borderless Windowed mode.
 
+## Run
 
+Install Python 3 and the required packages:
 
+```powershell
+py -m pip install customtkinter keyboard mss numpy pyopengl pywin32
+py main.py
+```
 
-## Known issues / to-dos
+The GUI controls zoom, capture size, filtering, frame rate, and global hotkeys.
+Default keybinds are defined in `Config.py` and can be rebound while the app is
+running.
 
-- resolutions different from 1920x1080, image centering is off center
-- defaults to main monitor, need to do monitor detection and be able to switch between monitors
+## Performance
 
-****
+The default 45 FPS and linear filter provide a balance between smoothness and
+game performance. If a game stutters, select 30 FPS and keep the capture region
+as small as practical. The renderer automatically avoids capturing and drawing
+parts of an enlarged overlay that would be outside the selected monitor.
+
+## Build
+
+Install PyInstaller and run the provided batch file:
+
+```powershell
+py -m pip install pyinstaller
+build.bat
+```
+
+The executable is written to `dist\FPSMagnifier.exe`.

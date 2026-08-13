@@ -20,21 +20,26 @@ class Config:
         self.CAPTURE_MAX     = 400
         self.CAPTURE_STEP    = 20
 
+        # Monitor index from mss.monitors. 1 is usually the primary display.
+        self.MONITOR_INDEX    = 1
+
         # ── Performance ──────────────────────────────────────────────────
-        self.FPS             = 60
-        self.TOPMOST_MS      = 500
+        self.FPS             = 45
+        self.FPS_OPTIONS     = (30, 45, 60)
+        self.IDLE_FPS        = 10
+        self.TOPMOST_MS      = 2000
+        self.LOW_PRIORITY    = True
 
         # ── Appearance ───────────────────────────────────────────────────
         self.BORDER_COLOR    = (0.0, 0.78, 0.0)
         self.BORDER_PX       = 2
 
-        self.CROSSHAIR       = True
-        self.CROSS_COLOR     = (1.0, 0.2, 0.2)
-        self.CROSS_LEN       = 12
-        self.CROSS_GAP       = 4
-        self.CROSS_WIDTH     = 1
+        # True hides the overlay from screenshots/recording when Windows supports it.
+        # Set False if you want screenshots to include the zoom window.
+        self.EXCLUDE_FROM_CAPTURE = True
 
         # "bicubic" = Catmull-Rom shader, "linear" = GPU bilinear, "nearest" = pixel-perfect
-        self.GPU_FILTER      = "bicubic"
+        self.GPU_FILTER      = "linear"
+
 
 config = Config()
