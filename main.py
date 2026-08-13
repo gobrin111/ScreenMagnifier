@@ -312,12 +312,12 @@ class App(ctk.CTk):
         self._sync_from_magnifier()
 
     def _on_zoom(self, val):
-        self.magnifier.zoom = round(float(val), 2)
+        self.magnifier.set_zoom(val)
         self.zoom_val.configure(text=f"{self.magnifier.zoom:.1f}x")
         self._last_zoom = self.magnifier.zoom
 
     def _on_region(self, val):
-        self.magnifier.radius = int(float(val))
+        self.magnifier.set_radius(float(val))
         self.region_val.configure(text=f"{self.magnifier.radius * 2}px")
         self._last_radius = self.magnifier.radius
 
@@ -448,6 +448,7 @@ class App(ctk.CTk):
         if self._poll_after_id is not None:
             self.after_cancel(self._poll_after_id)
             self._poll_after_id = None
+        config.save()
         self.magnifier.quit()
         self.worker.join(timeout=1.0)
         self.destroy()

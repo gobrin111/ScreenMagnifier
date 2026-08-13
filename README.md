@@ -21,6 +21,19 @@ The GUI also controls zoom, capture size, filtering, frame rate, and global
 hotkeys. Default keybinds are defined in `Config.py` and can be rebound while
 the app is running.
 
+## Saved settings
+
+The app restores the selected monitor, zoom, capture size, overlay FPS, GPU
+filter, hotkey state, and keybinds the next time it starts. Settings are stored
+per Windows user at:
+
+```text
+%LOCALAPPDATA%\FPSMagnifier\settings.json
+```
+
+The magnifier itself always starts off so reopening the app never immediately
+covers the selected display.
+
 ## Performance
 
 The default 45 FPS and linear filter provide a balance between smoothness and

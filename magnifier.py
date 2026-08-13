@@ -531,7 +531,7 @@ class Magnifier:
         self._needs_reposition = False
         self._rebuild_overlay = False
         self._needs_monitor_update = True
-        self.hotkeys_enabled = True
+        self.hotkeys_enabled = config.HOTKEYS_ENABLED
 
         self._hooks = {}
         self.sct = None
@@ -644,8 +644,23 @@ class Magnifier:
         config.GPU_FILTER = value
         self._rebuild_overlay = True
 
+    def set_zoom(self, value):
+        self.zoom = round(
+            max(config.ZOOM_MIN, min(config.ZOOM_MAX, float(value))),
+            2,
+        )
+        config.ZOOM = self.zoom
+
+    def set_radius(self, value):
+        self.radius = max(
+            config.CAPTURE_MIN,
+            min(config.CAPTURE_MAX, int(value)),
+        )
+        config.CAPTURE_RADIUS = self.radius
+
     def set_fps(self, value):
         self.fps = max(1, int(value))
+        config.FPS = self.fps
 
     # ── hotkey management ────────────────────────────────────────────────
 
@@ -688,6 +703,7 @@ class Magnifier:
 
     def set_hotkeys_enabled(self, enabled):
         enabled = bool(enabled)
+        config.HOTKEYS_ENABLED = enabled
         if enabled == self.hotkeys_enabled:
             return
 
@@ -788,16 +804,13 @@ class Magnifier:
     def adj_zoom(self, d):
         if not self.on:
             return
-        self.zoom = round(
-            max(config.ZOOM_MIN, min(config.ZOOM_MAX, self.zoom + d)),
-            2,
-        )
+        self.set_zoom(self.zoom + d)
         print(f"    zoom -> {self.zoom:.1f}x")
 
     def adj_radius(self, d):
         if not self.on:
             return
-        self.radius = max(config.CAPTURE_MIN, min(config.CAPTURE_MAX, self.radius + d))
+        self.set_radius(self.radius + d)
         print(f"    region -> {self.radius*2}px")
 
     def quit(self):
