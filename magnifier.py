@@ -537,13 +537,48 @@ class Magnifier:
         self.sct = None
         self.monitor_index = config.MONITOR_INDEX
 
+    @staticmethod
+    def detect_monitors():
+        """Return the physical displays currently reported by Windows."""
+        capture = mss.MSS()
+        try:
+            return [
+                {
+                    "index": index,
+                    "left": int(monitor["left"]),
+                    "top": int(monitor["top"]),
+                    "width": int(monitor["width"]),
+                    "height": int(monitor["height"]),
+                    "primary": (
+                        int(monitor["left"]) == 0
+                        and int(monitor["top"]) == 0
+                    ),
+                }
+                for index, monitor in enumerate(capture.monitors[1:], start=1)
+            ]
+        finally:
+            capture.close()
+
+    def set_monitor(self, monitor_index):
+        """Request a display change on the renderer thread."""
+        monitor_index = int(monitor_index)
+        if monitor_index < 1:
+            raise ValueError("Monitor index must refer to a physical display")
+
+        self.monitor_index = monitor_index
+        config.MONITOR_INDEX = monitor_index
+        self._needs_monitor_update = True
+
     def _update_monitor_geometry(self):
         if self.sct is None:
             return
 
         monitors = self.sct.monitors
-        if self.monitor_index >= len(monitors):
+        if len(monitors) <= 1:
+            raise RuntimeError("Windows did not report any physical displays")
+        if self.monitor_index < 1 or self.monitor_index >= len(monitors):
             self.monitor_index = 1
+            config.MONITOR_INDEX = self.monitor_index
 
         m = monitors[self.monitor_index]
         self.screen_left = int(m["left"])

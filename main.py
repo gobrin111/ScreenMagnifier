@@ -80,7 +80,7 @@ class App(ctk.CTk):
         )
 
         self.title("FPS Magnifier")
-        self.geometry("340x690")
+        self.geometry("340x745")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -90,6 +90,8 @@ class App(ctk.CTk):
         self._last_radius = None
         self._last_fps = None
         self._last_hotkeys_enabled = None
+        self._last_monitor_index = None
+        self._monitors_by_label = {}
 
         header = ctk.CTkFrame(self, fg_color="transparent")
         header.pack(fill="x", padx=20, pady=(18, 4))
@@ -144,6 +146,33 @@ class App(ctk.CTk):
             width=46,
         )
         self.hotkeys_switch.pack(side="right")
+
+        self._section_label("Display", top_pad=0)
+
+        monitor_frame = ctk.CTkFrame(self, fg_color="transparent")
+        monitor_frame.pack(fill="x", padx=20, pady=(0, 4))
+
+        self.monitor_var = ctk.StringVar(value="Detecting displays...")
+        self.monitor_menu = ctk.CTkOptionMenu(
+            monitor_frame,
+            variable=self.monitor_var,
+            values=["Detecting displays..."],
+            command=self._on_monitor,
+            font=ctk.CTkFont(size=12),
+            dynamic_resizing=False,
+        )
+        self.monitor_menu.pack(side="left", fill="x", expand=True, padx=(0, 8))
+
+        self.monitor_refresh_btn = ctk.CTkButton(
+            monitor_frame,
+            text="Refresh",
+            command=self._refresh_monitors,
+            width=66,
+            font=ctk.CTkFont(size=11),
+        )
+        self.monitor_refresh_btn.pack(side="right")
+
+        self._refresh_monitors()
 
         self._section_label("Zoom")
 
@@ -302,6 +331,67 @@ class App(ctk.CTk):
         self.magnifier.set_hotkeys_enabled(self.hotkeys_var.get())
         self._sync_from_magnifier()
 
+    @staticmethod
+    def _monitor_label(monitor):
+        label = (
+            f"Monitor {monitor['index']}: "
+            f"{monitor['width']}x{monitor['height']}"
+        )
+        if monitor["primary"]:
+            return f"{label} (Primary)"
+        return f"{label} ({monitor['left']:+d}, {monitor['top']:+d})"
+
+    def _refresh_monitors(self):
+        try:
+            monitors = self.magnifier.detect_monitors()
+        except Exception as exc:
+            self._monitors_by_label = {}
+            self.monitor_menu.configure(
+                values=["Display detection failed"],
+                state="disabled",
+            )
+            self.monitor_var.set("Display detection failed")
+            print(f"  Display detection failed: {exc}")
+            return
+
+        if not monitors:
+            self._monitors_by_label = {}
+            self.monitor_menu.configure(
+                values=["No displays found"],
+                state="disabled",
+            )
+            self.monitor_var.set("No displays found")
+            return
+
+        self._monitors_by_label = {
+            self._monitor_label(monitor): monitor["index"]
+            for monitor in monitors
+        }
+        labels = list(self._monitors_by_label)
+        self.monitor_menu.configure(values=labels, state="normal")
+
+        selected_index = self.magnifier.monitor_index
+        selected_label = next(
+            (
+                label
+                for label, index in self._monitors_by_label.items()
+                if index == selected_index
+            ),
+            labels[0],
+        )
+        selected_index = self._monitors_by_label[selected_label]
+        self.monitor_var.set(selected_label)
+        if selected_index != self.magnifier.monitor_index:
+            self.magnifier.set_monitor(selected_index)
+        self._last_monitor_index = selected_index
+
+    def _on_monitor(self, label):
+        monitor_index = self._monitors_by_label.get(label)
+        if monitor_index is None:
+            return
+        self.magnifier.set_monitor(monitor_index)
+        self._last_monitor_index = monitor_index
+
     def _poll_status(self):
         self._sync_from_magnifier()
         self._poll_after_id = self.after(200, self._poll_status)
@@ -312,6 +402,7 @@ class App(ctk.CTk):
         radius = int(self.magnifier.radius)
         fps = int(self.magnifier.fps)
         hotkeys_enabled = bool(self.magnifier.hotkeys_enabled)
+        monitor_index = int(self.magnifier.monitor_index)
 
         if on != self._last_on:
             if on:
@@ -339,6 +430,19 @@ class App(ctk.CTk):
         if hotkeys_enabled != self._last_hotkeys_enabled:
             self.hotkeys_var.set(hotkeys_enabled)
             self._last_hotkeys_enabled = hotkeys_enabled
+
+        if monitor_index != self._last_monitor_index:
+            selected_label = next(
+                (
+                    label
+                    for label, index in self._monitors_by_label.items()
+                    if index == monitor_index
+                ),
+                None,
+            )
+            if selected_label is not None:
+                self.monitor_var.set(selected_label)
+            self._last_monitor_index = monitor_index
 
     def _on_close(self):
         if self._poll_after_id is not None:

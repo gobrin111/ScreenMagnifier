@@ -12,9 +12,14 @@ py -m pip install customtkinter keyboard mss numpy pyopengl pywin32
 py main.py
 ```
 
-The GUI controls zoom, capture size, filtering, frame rate, and global hotkeys.
-Default keybinds are defined in `Config.py` and can be rebound while the app is
-running.
+The GUI detects connected monitors and lets you choose which display to
+magnify. Use **Refresh** after connecting, disconnecting, or rearranging a
+display. The magnifier stays centered on the selected monitor, including
+monitors positioned above or to the left of the primary display.
+
+The GUI also controls zoom, capture size, filtering, frame rate, and global
+hotkeys. Default keybinds are defined in `Config.py` and can be rebound while
+the app is running.
 
 ## Performance
 
